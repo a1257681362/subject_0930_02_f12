@@ -32,6 +32,12 @@ public class GlobalExceptionHandler {
         return ApiResponse.fail("该资源不支持 " + ex.getMethod() + " 操作");
     }
 
+    @ExceptionHandler(com.evops.aqua.maint.service.ConcurrentOperationRejectedException.class)
+    public ApiResponse<Void> handleMaintConcurrentRejected(
+            com.evops.aqua.maint.service.ConcurrentOperationRejectedException ex) {
+        return ApiResponse.fail(ex.getMessage());
+    }
+
     @ExceptionHandler(AuthenticationException.class)
     public ApiResponse<Void> handleAuthentication(AuthenticationException ex) {
         return ApiResponse.fail("用户名或密码错误");

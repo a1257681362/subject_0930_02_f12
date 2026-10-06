@@ -164,3 +164,19 @@
 - 池塘档案补充中心点经纬度（`POST /api/aqua/ponds` 的 `longitude`/`latitude`，可空）；无坐标池塘只能被整海区规则命中，不会被多边形规则误伤。
 
 验收：`mvn test -Dtest=NoCultureAcceptanceTest`，11 个检查点逐段输出报告，失败即停并给出停点。
+## 增氧机/泵站/投饵机保养工单（aqua-12）
+
+模块包路径 `com.evops.aqua.maint`，覆盖三类养殖设备（AERATOR 增氧机 / PUMP_STATION 泵站 / FEEDER 投饵机）的预防性保养闭环：设备建档并上报运行小时 → 计划按运行小时或日历周期到期生成工单 → 工单关联停机窗口、备件需求与维修人员 → 开工停机、换件（旧件序列号永久保留）→ 完工 → 验收通过 → 安全确认三项合格 → 恢复运行并关闭；逾期自动升级，计划调整不波及已生成工单，同一操作并发只一生效、余者拒绝并审计。
+
+- 设备与运行小时（`POST /api/aqua/maintenance/devices`、`/devices/{id}/meter-readings`）：读数流水只追加且单调不减，回退读数直接拒绝；设备状态 RUNNING/MAINT/STOPPED，开工转 MAINT、安全确认后才回 RUNNING。
+- 双触发保养计划（`POST /plans`，requestId 幂等）：`triggerType=HOURS` 按运行小时（`intervalHours`+`leadHours`，首到期读数=锚点+间隔−提前量），`CALENDAR` 按日历周期（`intervalDays`+`leadDays`）；计划备件模板随工单复制为备件需求行。同设备同保养项目至多一个生效计划（`active_flag` 唯一槽位，取消置 NULL 保留历史）。
+- 工单生成：每日 Quartz 扫描（`aqua.maint.scan-cron`，默认 02:30）按"读数到阈值/日期到"生成，也可 `POST /orders/generate` 人工触发；同设备同项目存在未关闭工单则跳过/拒绝，期数键保证扫描幂等、重启补跑不多写。
+- **计划调整只影响未生成工单**（`PUT /plans/{id}/adjust`）：只重算后续 `next_due_*` 排期，已生成工单的到期时间/快照一律不变；工单关闭后以实际完工读数/日期重锚。
+- 工单全生命周期：分派（`/orders/{id}/assign`，必须关联 OPEN 且设备一致的停机窗口 + ACTIVE 维修人员）→ 开工（当前时间必须落在窗口区间，设备转 MAINT 并快照读数）→ 换件 → 完工（备件需求必须全部换完）→ 验收（驳回须填原因退回返修）→ 安全确认 → 关闭。**未验收通过（accepted_flag=FALSE）一律不能关闭**。
+- 备件序列号与旧件保留（`POST /orders/{id}/part-replacements`）：备件按序列号逐件管理、全库唯一；换件时旧件序列号必填，只追加写 `t_maint_part_replacement`（旧→新、处置方式 RECYCLED/DISPOSED、更换人/时间），新件必须在库、装机后挂设备；旧件行不改写不删除，`GET /replacements?serialNo=` 可双向追溯谱系。
+- **恢复运行前强制安全确认**（`/orders/{id}/safety-confirm`）：断电隔离、上锁挂牌、复检三项必须全部 TRUE，缺项拒绝且不落安全确认单；未完成合格安全确认不能关闭工单、设备不能恢复 RUNNING。
+- 逾期自动升级：未开工工单超过 dueTime+2h 升一级（HIGH/现场主管），一级后再过 24h 仍未开工升二级（URGENT/设备主管）；已到级不重复升级，每次升级写证据。
+- **同一操作并发仲裁**：开放窗口、建/调/取消计划、生成工单、工单生命周期操作先抢占生效占位（独立事务 `REQUIRES_NEW` 立即提交对他事务可见），并发后来者抢位失败即以独立事务写 `t_maint_concurrency_reject`（记载 winner/loser 的操作人与 requestId、原因，业务回滚不影响审计）并返回冲突失败——**明确谁生效、谁被拒**；业务结束占位立即释放，崩溃残留占位超 10 分钟可接管。唯一槽位用可空标记列参与唯一索引（H2 多行 NULL 不冲突），关闭/取消历史不限行数。
+- 全程留证：设备、计划、窗口、备件、工单、换件、安全确认、升级、并发拒单全部写 `t_maint_change_evidence`（操作者、前后 JSON 快照、requestId，只追加）；`GET /concurrency-rejects` 查拒单审计，`GET /evidence` 按对象/动作/请求号追溯。
+
+验收：`mvn test -Dtest=EquipmentMaintenanceAcceptanceTest`，14 个检查点（CP11/CP12 为 CountDownLatch 门闩驱动的真实双线程并发）逐段输出报告，失败即停。

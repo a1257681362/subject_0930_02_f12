@@ -32,6 +32,9 @@ shiro:
 aqua:
   disease:
     followup-scan-cron: "0 0 0 1 1 ? 2099"
+  maint:
+    generate-scan-cron: "0 0 0 1 1 ? 2099"
+    escalate-scan-cron: "0 0 0 1 1 ? 2099"
 
 logging:
   level:

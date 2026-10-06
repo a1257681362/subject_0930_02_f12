@@ -164,3 +164,22 @@
 - 池塘档案补充中心点经纬度（`POST /api/aqua/ponds` 的 `longitude`/`latitude`，可空）；无坐标池塘只能被整海区规则命中，不会被多边形规则误伤。
 
 验收：`mvn test -Dtest=NoCultureAcceptanceTest`，11 个检查点逐段输出报告，失败即停并给出停点。
+
+## 养殖设备保养工单（aqua-12）
+
+模块包路径 `com.evops.aqua.maint`，打通：增氧机/泵站/投饵机建档（一物一序列号备件、停机窗口、维修人员资质）→ 运行小时与日历双轨保养计划 → 到期扫描生成工单（关联停机窗口/备件/人员，冻结计划版本）→ 派工 → 开工停机 → 换件留旧件序列号 → 完工 → 验收 → 逐项安全确认 → 关闭恢复运行；逾期自动升级，同一操作并发裁决谁生效谁被拒并保留审计。
+
+- 设备档案（`POST /api/aqua/maint/devices`）：AERATOR 增氧机 / PUMP_STATION 泵站 / FEEDER 投饵机；状态 RUNNING/DOWN。运行小时上报（`POST /{id}/meter-readings`，requestId 幂等）只追加，**累计读数不得回退**；`POST /{id}/installed-parts` 登记初始装机序列号基线。
+- 停机窗口（`POST /api/aqua/maint/devices/{deviceId}/windows`）：半开区间 `[start,end)`，同设备窗口半开重叠拒绝、端点相接允许，requestId 幂等；**工单计划时段必须被设备的开放窗口完整覆盖，一张窗口只安排一张工单**。
+- 备件（`/api/aqua/maint/spare-catalogs`、`/spare-parts`）：品类目录 + 一物一序列号实例（IN_STOCK/RESERVED/INSTALLED/SCRAPPED）。**工单建立即按需求行锁定在库实例，库存不足整单回滚不残留半占用**；完工未用件释放回在库。
+- 维修人员（`POST /api/aqua/maint/workers`）：按设备类型登记资质；派工时**在职且资质覆盖设备类型，冲突一次性列全**；工单头记主修、明细支持多人，留派工人。
+- 保养计划（`POST /api/aqua/maint/plans`）：一设备一行，**运行小时（间隔小时）与日历周期（间隔天+起算日）双轨**，可单开或同开，计划挂备件模板；`POST /{id}/adjust` 调整间隔/开关/起算日，version_no 递增——**调整只影响尚未生成的工单，已生成工单冻结旧版本（plan_version_no、到期读数/到期日、备件快照）永不回改，且不追溯补单**。
+- 工单生成（Quartz 每 30 分钟扫描，`POST /api/aqua/maint/orders/scan` 可手工触发同逻辑）：小时轨「当前读数−上次生成基准 ≥ 间隔」到期、日历轨「基准日+间隔天 ≤ 今天」到期；匹配设备最早可用开放窗口后以独立事务生成，**uk(plan,trigger_source,due_token) 与同轨未结单判定保证重跑幂等不多写**；到期但无可用窗口跳过并留证（重扫不重复刷证据）。
+- 工单生命周期（`/api/aqua/maint/orders/{id}`）：PLANNED → ASSIGNED（派工关联人员）→ IN_PROGRESS（**开工即设备 DOWN**，按设备类型生成 6 项安全清单）→ COMPLETED（释放未用备件）→ ACCEPTED（**验收人与意见缺一不可**）→ CLOSED。**未验收（非 ACCEPTED）不能关闭**。
+- 备件替换（`POST /{id}/parts/{catalogId}/replace`，requestId 幂等）：新件必须是本单锁定实例、旧件序列号必须是当前装在该设备上的在册实例；**新件转 INSTALLED、旧件转 SCRAPPED 永久保留（原装机信息、拆除工单均不清除），换件记录同时留存新旧序列号与换件人**。
+- 安全确认（`POST /{id}/safety-checks/{checkId}/confirm`）：通用 3 项 + 设备专项 3 项逐项确认，重复确认不覆盖首次确认人；**设备恢复运行（关闭工单）前全部检查项必须 CONFIRMED，未确认项在拒绝信息中逐项列出**。
+- 逾期自动升级（Quartz 每 15 分钟，`POST /orders/escalate-scan` 手工触发）：过完工期限未完工 NORMAL → WARNING，逾期超 24 小时 → ESCALATED；**升级只追加不回落，重扫幂等不多写**，操作者固定 system-scheduler。
+- **同一操作并发裁决**（开工 `WORK_ORDER_START:{工单}`、恢复运行 `DEVICE_RESUME:{设备}`、临时开票 `MANUAL_ORDER_WINDOW:{窗口}`）：库级唯一锁串行化，**先到请求 EFFECTIVE 生效，其余 CONCURRENT_REJECTED 立即被拒，拒绝响应与审计均写明生效请求号、双方操作者与拒绝原因**；被拒审计独立事务落库不随业务回滚，锁在业务事务完成后释放；同 requestId 重放幂等返回首次结果。`GET /api/aqua/maint/concurrent-audits` 可按业务键/请求号双向追溯。
+- 全程留证：设备登记/初始装机/运行小时/窗口/计划创建调整/工单生成跳过/派工/开工/换件/完工/验收/安全确认/关闭/逾期升级均写 `t_maint_change_evidence`（含操作者、前后 JSON 快照与幂等请求号），可经 `GET /api/aqua/maint/evidence` 按对象或 requestId 追溯。
+
+验收：`mvn test -Dtest=MaintenanceWorkOrderAcceptanceTest`，18 个检查点逐段输出报告（含真实双线程并发竞争校验），失败即停并给出停点。
